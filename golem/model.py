@@ -1,8 +1,10 @@
 import datetime
 import enum
+import hashlib
 import inspect
 import json
 import pickle
+import struct
 import sys
 import time
 from typing import Any, Dict, Optional
@@ -10,6 +12,7 @@ from typing import Any, Dict, Optional
 from eth_utils import decode_hex, encode_hex
 from ethereum.utils import denoms
 import golem_messages
+from golem_messages import cryptography
 from golem_messages import datastructures as msg_dt
 from golem_messages import message
 from golem_messages.datastructures import p2p as dt_p2p, masking
@@ -860,6 +863,111 @@ class UsageFactor(BaseModel):
             f"provider={self.provider_node_id}, "
             f"usage_factor={self.usage_factor}"
             f">"
+        )
+
+
+class Broadcast(BaseModel):
+    class Error(Exception):
+        pass
+
+    class TYPE(enum.IntEnum):
+        Version = enum.auto()
+    HEADER_FORMAT = '!HQ'
+    HEADER_LENGTH = struct.calcsize(HEADER_FORMAT)
+    SIGNATURE_LENGTH = 65
+    timestamp = IntegerField()
+    broadcast_type = EnumField(TYPE)
+    signature = BlobField()
+    data = BlobField()
+
+    def __repr__(self):
+        return (
+            f"<{self.__class__.__qualname__}"
+            f" {self.timestamp} {self.broadcast_type.name}>"
+        )
+
+    @classmethod
+    def create_and_sign(cls, private_key, broadcast_type, data) -> 'Broadcast':
+        bc = cls()
+        bc.timestamp = int(time.time())
+        bc.broadcast_type = broadcast_type
+        bc.data = data
+        bc.sign(private_key=private_key)
+        bc.save(force_insert=True)
+        return bc
+
+    def process(self):
+        print('*'*80)
+        print('Processing', self)
+        print(self.data)
+        print('*'*80)
+        if Broadcast.select().where(
+                Broadcast.broadcast_type == self.broadcast_type,
+                Broadcast.timestamp == self.timestamp,
+        ).exists():
+            return
+        if self.broadcast_type is self.TYPE.Version:
+            from golem.network.p2p.peersession import compare_version
+            compare_version(self.data.decode('utf-8', 'replace'))
+        self.save(force_insert=True)
+
+    def header_to_bytes(self) -> bytes:
+        return struct.pack(
+            self.HEADER_FORMAT,
+            self.broadcast_type,
+            self.timestamp,
+        )
+
+    def header_from_bytes(self, b: bytes) -> None:
+        try:
+            broadcast_type, self.timestamp = struct.unpack(
+                self.HEADER_FORMAT,
+                b,
+            )
+            self.broadcast_type = self.TYPE(broadcast_type)
+        except (ValueError, struct.error):
+            from golem.network import broadcast
+            raise broadcast.BroadcastError('Invalid header')
+
+    @classmethod
+    def from_bytes(cls, b: bytes) -> 'Broadcast':
+        # Remember to verify signature
+        if len(b) < cls.HEADER_LENGTH + cls.SIGNATURE_LENGTH:
+            from golem.network import broadcast
+            raise broadcast.BroadcastError(
+                'Invalid broadcast: too short'
+                f' ({len(b)} < {cls.HEADER_LENGTH + cls.SIGNATURE_LENGTH})',
+            )
+        bc = cls()
+        bc.header_from_bytes(b[:cls.HEADER_LENGTH])
+        bc.signature = b[
+            cls.HEADER_LENGTH:cls.HEADER_LENGTH+cls.SIGNATURE_LENGTH
+        ]
+        bc.data = b[cls.HEADER_LENGTH+cls.SIGNATURE_LENGTH:]
+        return bc
+
+    def to_bytes(self) -> bytes:
+        return self.header_to_bytes() + self.signature + self.data
+
+    def get_hash(self) -> bytes:
+        sha = hashlib.sha1()
+        sha.update(self.header_to_bytes())
+        sha.update(self.data)
+        return sha.digest()
+
+    def sign(self, private_key: bytes) -> None:
+        assert self.signature is None
+        self.signature = cryptography.ecdsa_sign(
+            privkey=private_key,
+            msghash=self.get_hash(),
+        )
+
+    def verify_signature(self, public_key: bytes) -> None:
+        # XXX MultiSig solution? Like two of three?
+        cryptography.ecdsa_verify(
+            pubkey=public_key,
+            signature=self.signature,
+            message=self.get_hash(),
         )
 
 

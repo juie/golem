@@ -72,7 +72,7 @@ class P2PService(tcpserver.PendingConnectionsServer, DiagnosticsProvider):  # no
         """
         network = tcpnetwork.TCPNetwork(
             ProtocolFactory(
-                tcpnetwork.SafeProtocol,
+                tcpnetwork.BroadcastProtocol,
                 self,
                 SessionFactory(PeerSession)
             ),
@@ -83,6 +83,10 @@ class P2PService(tcpserver.PendingConnectionsServer, DiagnosticsProvider):  # no
 
         self.node = node
         self.keys_auth = keys_auth
+        print('*'*80)
+        print(self.keys_auth.ecc.raw_privkey)
+        print(self.keys_auth.ecc.raw_pubkey)
+        print('*'*80)
         self.peer_keeper = PeerKeeper(keys_auth.key_id)
         self.task_server = None
         self.metadata_manager = None
